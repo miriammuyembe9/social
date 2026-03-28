@@ -1,84 +1,5 @@
 const { supabase } = require('../config/supabase');
-const path         = require('path');
-const fs           = require('fs');
-const { execFile } = require('child_process');
-
-// ── FFmpeg: trim + optional music mix ────────────────────────────────────────
-// Fast: uses stream copy (-c copy) when no audio mix needed.
-// Returns path to processed file. Caller must handle cleanup.
-const processVideo = (videoPath, opts) => new Promise((resolve, reject) => {
-  const { trimStart, trimEnd, audioPath, audioVol } = opts;
-  const ext     = path.extname(videoPath) || '.mp4';
-  const outPath = videoPath.replace(ext, '_ve' + ext);
-  const args    = [];
-
-  if (trimStart != null) args.push('-ss', String(trimStart));
-  args.push('-i', videoPath);
-
-  if (audioPath) {
-    args.push('-i', audioPath);
-    const vol = parseFloat(audioVol) || 0.7;
-    args.push(
-      '-filter_complex',
-      `[0:a]aformat=fltp:44100:stereo,volume=1.0[va];[1:a]aformat=fltp:44100:stereo,volume=${vol}[ma];[va][ma]amix=inputs=2:duration=shortest[aout]`,
-      '-map', '0:v', '-map', '[aout]',
-      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k'
-    );
-  } else {
-    args.push('-c', 'copy');
-  }
-
-  if (trimStart != null && trimEnd != null) {
-    args.push('-t', String(Math.max(0.1, parseFloat(trimEnd) - parseFloat(trimStart))));
-  }
-
-  args.push('-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', '-y', outPath);
-
-  execFile('ffmpeg', args, { timeout: 300000 }, (err) => {
-    if (err) return reject(new Error('FFmpeg: ' + err.message));
-    resolve(outPath);
-  });
-});
-
-// ── Apply editor params from FormData ─────────────────────────────────────────
-// Works whether route uses upload.single (req.file) or upload.fields (req.files)
-const applyVideoEditor = async (req, fileField) => {
-  // Get the main video/media file
-  let fileObj = Array.isArray(req.files)
-    ? req.files.find(f => f.fieldname === fileField)
-    : req.files?.[fileField]?.[0] || req.file;
-
-  if (!fileObj) return null;
-
-  const trimStart = req.body.trim_start != null && req.body.trim_start !== '' ? parseFloat(req.body.trim_start) : null;
-  const trimEnd   = req.body.trim_end   != null && req.body.trim_end   !== '' ? parseFloat(req.body.trim_end)   : null;
-  const audioObj  = Array.isArray(req.files)
-    ? req.files.find(f => f.fieldname === 'audio')
-    : req.files?.audio?.[0] || null;
-  const audioPath = audioObj ? audioObj.path : null;
-  const audioVol  = req.body.audio_vol || '0.7';
-  const needsProc = (trimStart != null) || audioPath;
-
-  let finalPath = fileObj.path;
-
-  if (needsProc) {
-    try {
-      const procPath = await processVideo(fileObj.path, { trimStart, trimEnd, audioPath, audioVol });
-      // Replace original with processed
-      try { fs.unlinkSync(fileObj.path); } catch (_) {}
-      if (audioPath) try { fs.unlinkSync(audioPath); } catch (_) {}
-      // Rename: remove _ve suffix for clean filename
-      const cleanPath = procPath.replace('_ve', '');
-      fs.renameSync(procPath, cleanPath);
-      finalPath = cleanPath;
-    } catch (e) {
-      console.error('[applyVideoEditor] FFmpeg failed:', e.message, '— using original');
-      // Fall through: use original file unchanged
-    }
-  }
-
-  return { ...fileObj, path: finalPath, filename: path.basename(finalPath) };
-};
+const { uploadBuffer, enrichMediaUrl, enrichUser, deleteFile, buildUrl, buildVideoThumb } = require('../config/cloudinary');
 
 // ===== USER CONTROLLER =====
 exports.getProfile = async (req, res) => {
@@ -93,7 +14,7 @@ exports.getProfile = async (req, res) => {
     const { data: isFollowing } = await supabase
       .from('follows').select('follower_id')
       .eq('follower_id', req.user.id).eq('following_id', data.id).single();
-    res.json({ ...data, is_following: !!isFollowing });
+    res.json({ ...enrichUser(data), is_following: !!isFollowing });
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -109,13 +30,19 @@ exports.updateProfile = async (req, res) => {
   }
   if (location !== undefined) updates.location = location;
 
-  // Avatar upload — goes to /uploads/avatars/
+  // Avatar upload → Cloudinary
   if (req.files?.avatar && req.files.avatar[0]) {
-    updates.avatar_url = '/uploads/avatars/' + req.files.avatar[0].filename;
+    try {
+      const r = await uploadBuffer(req.files.avatar[0].buffer, req.files.avatar[0].mimetype, 'avatar');
+      updates.avatar_url = r.public_id;
+    } catch (e) { console.error('[updateProfile] avatar upload:', e.message); }
   }
-  // Cover upload — goes to /uploads/images/
+  // Cover upload → Cloudinary
   if (req.files?.cover && req.files.cover[0]) {
-    updates.cover_url = '/uploads/images/' + req.files.cover[0].filename;
+    try {
+      const r = await uploadBuffer(req.files.cover[0].buffer, req.files.cover[0].mimetype, 'cover');
+      updates.cover_url = r.public_id;
+    } catch (e) { console.error('[updateProfile] cover upload:', e.message); }
   }
 
   try {
@@ -124,7 +51,7 @@ exports.updateProfile = async (req, res) => {
       .select('id,name,username,email,gender,avatar_url,cover_url,bio,website,location,followers_count,following_count,posts_count,is_verified')
       .single();
     if (error) throw error;
-    res.json(data);
+    res.json(enrichUser(data));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -193,7 +120,7 @@ exports.searchUsers = async (req, res) => {
     .or(`name.ilike.%${q}%,username.ilike.%${q}%`)
     .neq('id', req.user.id)
     .limit(20);
-  res.json(data || []);
+  res.json((data || []).map(u => enrichUser(u)));
 };
 
 exports.getUserPosts = async (req, res) => {
@@ -224,7 +151,7 @@ exports.getUserPosts = async (req, res) => {
           } catch(_) {}
         }
       }
-      return { ...parsed, users: user, liked: likedSet.has(p.id) };
+      return { ...enrichMediaUrl(parsed), users: enrichUser(user), liked: likedSet.has(p.id) };
     }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
@@ -273,7 +200,7 @@ exports.getNotifications = async (req, res) => {
       : { data: [] };
     const actorMap = {};
     (actors || []).forEach(u => { actorMap[u.id] = u; });
-    res.json(data.map(n => ({ ...n, users: actorMap[n.actor_id] || null })));
+    res.json(data.map(n => ({ ...n, users: enrichUser(actorMap[n.actor_id]) || null })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -317,7 +244,7 @@ exports.getConversations = async (req, res) => {
       // Count unread messages for this conversation
       const { data: unreadMsgs } = await supabase.from('messages').select('id')
         .eq('receiver_id', uid).eq('sender_id', partnerId).eq('is_read', false);
-      convos.push({ partner, last_message: m.content, last_message_time: m.created_at, last_message_type: m.message_type, unread_count: (unreadMsgs || []).length });
+      convos.push({ partner: enrichUser(partner), last_message: m.content, last_message_time: m.created_at, last_message_type: m.message_type, unread_count: (unreadMsgs || []).length });
     }
     res.json(convos);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -336,7 +263,7 @@ exports.getMessages = async (req, res) => {
       .order('created_at', { ascending: true })
       .range(from, from + parseInt(limit) - 1);
     await supabase.from('messages').update({ is_read: true }).eq('receiver_id', uid).eq('sender_id', partnerId).eq('is_read', false);
-    res.json(data || []);
+    res.json((data || []).map(m => enrichMediaUrl(m)));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -357,7 +284,13 @@ exports.deleteConversation = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   const { receiverId, content, message_type } = req.body;
   let media_url = null;
-  if (req.file) media_url = '/uploads/' + (req.file.mimetype.startsWith('audio') ? 'voice-comments' : 'images') + '/' + req.file.filename;
+  if (req.file) {
+    try {
+      const cldType = req.file.mimetype.startsWith('audio') ? 'voice' : 'message_image';
+      const r = await uploadBuffer(req.file.buffer, req.file.mimetype, cldType);
+      media_url = r.public_id;
+    } catch (e) { console.error('[sendMessage] upload:', e.message); }
+  }
   try {
     const { data, error } = await supabase
       .from('messages')
@@ -443,23 +376,27 @@ exports.getVideos = async (req, res) => {
     const userIds = [...new Set(videos.map(v => v.user_id))];
     const { data: users } = await supabase.from('users').select('id,name,username,avatar_url,is_verified').in('id', userIds);
     const um = {}; (users||[]).forEach(u => { um[u.id] = u; });
-    res.json(videos.map(v => ({ ...v, users: um[v.user_id] || null })));
+    res.json(videos.map(v => ({ ...enrichMediaUrl(v), thumbnail_url: buildVideoThumb(v.video_url), users: enrichUser(um[v.user_id]) || null })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
 exports.uploadVideo = async (req, res) => {
   const { title, description, duration_seconds } = req.body;
-  // Works with upload.single('video') OR upload.fields([{name:'video'},{name:'audio'}])
-  const processed = await applyVideoEditor(req, 'video');
-  if (!processed) return res.status(400).json({ error: 'No video file' });
-  const video_url = '/uploads/videos/' + processed.filename;
+  const fileObj = Array.isArray(req.files)
+    ? req.files.find(f => f.fieldname === 'video')
+    : req.files?.video?.[0] || req.file;
+  if (!fileObj) return res.status(400).json({ error: 'No video file' });
   try {
+    const result    = await uploadBuffer(fileObj.buffer, fileObj.mimetype, 'video');
+    const video_url = result.public_id;
+    const dur       = result.duration || (duration_seconds ? parseFloat(duration_seconds) : null);
     const { data, error } = await supabase
       .from('videos')
-      .insert({ user_id: req.user.id, title, description, video_url, duration_seconds: duration_seconds || null })
+      .insert({ user_id: req.user.id, title, description, video_url, duration_seconds: dur })
       .select('*').single();
     if (error) throw error;
-    res.status(201).json(data);
+    // Return with full CDN URL
+    res.status(201).json(enrichMediaUrl({ ...data, video_url: result.public_id }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -547,7 +484,7 @@ exports.getGroupMessages = async (req, res) => {
     const { data: users } = await supabase
       .from('users').select('id, name, username, avatar_url').in('id', userIds);
     const um = {}; (users || []).forEach(u => { um[u.id] = u; });
-    res.json(data.map(m => ({ ...m, sender: um[m.sender_id] || null })));
+    res.json(data.map(m => ({ ...enrichMediaUrl(m), sender: enrichUser(um[m.sender_id]) || null })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -563,8 +500,11 @@ exports.sendGroupMessage = async (req, res) => {
 
     let media_url = null;
     if (req.file) {
-      const folder = req.file.mimetype.startsWith('video') ? 'videos' : 'images';
-      media_url = '/uploads/' + folder + '/' + req.file.filename;
+      try {
+        const cldType = req.file.mimetype.startsWith('video') ? 'post_video' : 'message_image';
+        const r = await uploadBuffer(req.file.buffer, req.file.mimetype, cldType);
+        media_url = r.public_id;
+      } catch (e) { console.error('[sendGroupMessage] upload:', e.message); }
     }
     const { data, error } = await supabase
       .from('group_messages')
@@ -702,7 +642,7 @@ exports.getFriendRequests = async (req, res) => {
       .select('id, from_id, status, created_at, sender:from_id(id, name, username, avatar_url, is_verified)')
       .eq('to_id', req.user.id).eq('status', 'pending')
       .order('created_at', { ascending: false });
-    res.json(data || []);
+    res.json((data || []).map(r => ({ ...r, sender: enrichUser(r.sender) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -817,9 +757,9 @@ exports.getStories = async (req, res) => {
     // Group by user
     const grouped = {};
     stories.forEach(s => {
-      if (!grouped[s.user_id]) grouped[s.user_id] = { user: umap[s.user_id], stories: [], has_unseen: false };
+      if (!grouped[s.user_id]) grouped[s.user_id] = { user: enrichUser(umap[s.user_id]), stories: [], has_unseen: false };
       const seen = viewedSet.has(s.id);
-      grouped[s.user_id].stories.push({ ...s, seen });
+      grouped[s.user_id].stories.push({ ...enrichMediaUrl(s), seen });
       if (!seen) grouped[s.user_id].has_unseen = true;
     });
 
@@ -835,28 +775,24 @@ exports.getStories = async (req, res) => {
 
 exports.createStory = async (req, res) => {
   const { caption } = req.body;
-  // Works with upload.single('media') OR upload.fields([{name:'media'},{name:'audio'}])
-  // Get the raw file first (before processing) so we know mimetype
   const rawFile = Array.isArray(req.files)
     ? req.files.find(f => f.fieldname === 'media')
     : req.files?.media?.[0] || req.file;
 
-  console.log('[createStory] file:', rawFile ? rawFile.originalname : 'MISSING', '| body:', JSON.stringify(req.body));
-
   if (!rawFile) return res.status(400).json({ error: 'No media file received — make sure the field name is "media"' });
 
   const isVideo    = rawFile.mimetype.startsWith('video');
-  const folder     = isVideo ? 'videos' : 'images';
   const media_type = isVideo ? 'video' : 'image';
+  const cldType    = isVideo ? 'story_video' : 'story_image';
 
-  // For video stories: apply trim + music via FFmpeg if params present
-  let finalFilename = rawFile.filename;
-  if (isVideo) {
-    const processed = await applyVideoEditor(req, 'media');
-    if (processed) finalFilename = processed.filename;
+  let media_url;
+  try {
+    const result = await uploadBuffer(rawFile.buffer, rawFile.mimetype, cldType);
+    media_url = result.public_id;
+  } catch (uploadErr) {
+    console.error('[createStory] Cloudinary upload failed:', uploadErr.message);
+    return res.status(500).json({ error: 'Story upload failed: ' + uploadErr.message });
   }
-
-  const media_url = '/uploads/' + folder + '/' + finalFilename;
   try {
     const { data, error } = await supabase
       .from('stories')

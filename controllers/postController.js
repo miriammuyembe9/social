@@ -1,42 +1,5 @@
-const { supabase } = require('../config/supabase');
-const path         = require('path');
-const fs           = require('fs');
-const { execFile } = require('child_process');
-
-// ── FFmpeg: trim + optional music mix ────────────────────────────────────────
-const processVideo = (videoPath, opts) => new Promise((resolve, reject) => {
-  const { trimStart, trimEnd, audioPath, audioVol } = opts;
-  const ext     = path.extname(videoPath) || '.mp4';
-  const outPath = videoPath.replace(ext, '_ve' + ext);
-  const args    = [];
-
-  if (trimStart != null) args.push('-ss', String(trimStart));
-  args.push('-i', videoPath);
-
-  if (audioPath) {
-    args.push('-i', audioPath);
-    const vol = parseFloat(audioVol) || 0.7;
-    args.push(
-      '-filter_complex',
-      `[0:a]aformat=fltp:44100:stereo,volume=1.0[va];[1:a]aformat=fltp:44100:stereo,volume=${vol}[ma];[va][ma]amix=inputs=2:duration=shortest[aout]`,
-      '-map', '0:v', '-map', '[aout]',
-      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k'
-    );
-  } else {
-    args.push('-c', 'copy');
-  }
-
-  if (trimStart != null && trimEnd != null) {
-    args.push('-t', String(Math.max(0.1, parseFloat(trimEnd) - parseFloat(trimStart))));
-  }
-
-  args.push('-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', '-y', outPath);
-
-  execFile('ffmpeg', args, { timeout: 300000 }, (err) => {
-    if (err) return reject(new Error('FFmpeg: ' + err.message));
-    resolve(outPath);
-  });
-});
+const { supabase }    = require('../config/supabase');
+const { uploadBuffer, enrichMediaUrl, enrichUser, deleteFile, buildUrl } = require('../config/cloudinary');
 
 // ── GET FEED ─────────────────────────────────────────────
 exports.getFeed = async (req, res) => {
@@ -82,26 +45,12 @@ exports.getFeed = async (req, res) => {
     const bookSet  = new Set((bookRes.data  || []).map(b => b.post_id));
 
     return res.json(posts.map(p => {
-      let parsed = { ...p };
-      const raw = p.media_url;
-      if (raw) {
-        const trimmed = raw.trim();
-        if (trimmed.charAt(0) === '[') {
-          // Multi-image: media_url is a JSON array string
-          try {
-            const arr = JSON.parse(trimmed);
-            if (Array.isArray(arr) && arr.length) {
-              parsed.media_urls = arr;
-              parsed.media_url  = arr[0]; // first image as preview
-            }
-          } catch(_) { /* leave as single url */ }
-        }
-      }
+      const enriched = enrichMediaUrl({ ...p });
       return {
-        ...parsed,
-        users:      userMap[p.user_id] || null,
+        ...enriched,
+        users:      enrichUser(userMap[p.user_id]) || null,
         liked:      likedSet.has(p.id),
-        bookmarked: bookSet.has(p.id)
+        bookmarked: bookSet.has(p.id),
       };
     }));
   } catch (err) {
@@ -125,35 +74,26 @@ exports.createPost = async (req, res) => {
   let media_url = null;
 
   if (files.length === 1) {
-    const folder = files[0].mimetype.startsWith('video') ? 'videos' : 'images';
-    let filePath = files[0].path;
-
-    // Apply FFmpeg trim + music mix for video posts
-    if (files[0].mimetype.startsWith('video')) {
-      const trimStart = req.body.trim_start != null && req.body.trim_start !== '' ? parseFloat(req.body.trim_start) : null;
-      const trimEnd   = req.body.trim_end   != null && req.body.trim_end   !== '' ? parseFloat(req.body.trim_end)   : null;
-      const audioObj  = Array.isArray(req.files) ? req.files.find(f => f.fieldname === 'audio') : req.files?.audio?.[0] || null;
-      const audioPath = audioObj ? audioObj.path : null;
-      const audioVol  = req.body.audio_vol || '0.7';
-      if (trimStart != null || audioPath) {
-        try {
-          const procPath = await processVideo(filePath, { trimStart, trimEnd, audioPath, audioVol });
-          try { fs.unlinkSync(filePath); } catch (_) {}
-          if (audioPath) try { fs.unlinkSync(audioPath); } catch (_) {}
-          const cleanPath = procPath.replace('_ve', '');
-          fs.renameSync(procPath, cleanPath);
-          filePath = cleanPath;
-        } catch (e) {
-          console.error('[createPost] FFmpeg failed:', e.message, '— using original');
-        }
-      }
+    const isVideo = files[0].mimetype.startsWith('video');
+    const cldType = isVideo ? 'post_video' : 'post_image';
+    try {
+      const result = await uploadBuffer(files[0].buffer, files[0].mimetype, cldType);
+      media_url = result.public_id;   // store Cloudinary public_id in DB
+    } catch (uploadErr) {
+      console.error('[createPost] Cloudinary upload failed:', uploadErr.message);
+      return res.status(500).json({ error: 'Media upload failed: ' + uploadErr.message });
     }
-
-    media_url = '/uploads/' + folder + '/' + path.basename(filePath);
   } else if (files.length > 1) {
-    // Store all URLs as JSON array in media_url field (no extra column needed)
-    const urls = files.map(f => '/uploads/images/' + f.filename);
-    media_url = JSON.stringify(urls);
+    // Multi-image: upload all concurrently, store JSON array of public_ids
+    try {
+      const results = await Promise.all(
+        files.map(f => uploadBuffer(f.buffer, f.mimetype, 'post_image'))
+      );
+      media_url = JSON.stringify(results.map(r => r.public_id));
+    } catch (uploadErr) {
+      console.error('[createPost] Multi-image upload failed:', uploadErr.message);
+      return res.status(500).json({ error: 'Media upload failed: ' + uploadErr.message });
+    }
   }
 
   try {
@@ -185,21 +125,8 @@ exports.createPost = async (req, res) => {
       .then(({ data: u }) => supabase.from('users').update({ posts_count: (u?.posts_count || 0) + 1 }).eq('id', req.user.id))
       .catch(() => {});
 
-    // Parse media_url back to array if it's JSON (multi-image)
-    let parsedPost = { ...post };
-    if (post.media_url) {
-      const trimmed = post.media_url.trim();
-      if (trimmed.charAt(0) === '[') {
-        try {
-          const arr = JSON.parse(trimmed);
-          if (Array.isArray(arr) && arr.length) {
-            parsedPost.media_urls = arr;
-            parsedPost.media_url  = arr[0];
-          }
-        } catch(_) {}
-      }
-    }
-    return res.status(201).json({ ...parsedPost, users: user, liked: false, bookmarked: false });
+    const enriched = enrichMediaUrl({ ...post });
+    return res.status(201).json({ ...enriched, users: enrichUser(user), liked: false, bookmarked: false });
   } catch (err) {
     console.error('createPost exception:', err);
     return res.status(500).json({ error: err.message });
@@ -237,11 +164,25 @@ exports.likePost = async (req, res) => {
 exports.deletePost = async (req, res) => {
   const { id } = req.params;
   try {
-    const { data, error } = await supabase
-      .from('posts').delete()
-      .eq('id', id).eq('user_id', req.user.id)
-      .select('id').maybeSingle();
-    if (!data) return res.status(404).json({ error: 'Post not found or not yours' });
+    // Fetch media_url before deleting so we can clean up Cloudinary
+    const { data: postData } = await supabase
+      .from('posts').select('id, media_url, media_type')
+      .eq('id', id).eq('user_id', req.user.id).maybeSingle();
+    if (!postData) return res.status(404).json({ error: 'Post not found or not yours' });
+
+    // Delete from Cloudinary (fire-and-forget)
+    if (postData.media_url) {
+      const rtype = postData.media_type === 'video' ? 'video' : 'image';
+      if (postData.media_url.startsWith('[')) {
+        try {
+          JSON.parse(postData.media_url).forEach(pid => deleteFile(pid, 'image'));
+        } catch (_) {}
+      } else if (!postData.media_url.startsWith('http')) {
+        deleteFile(postData.media_url, rtype);
+      }
+    }
+
+    await supabase.from('posts').delete().eq('id', id).eq('user_id', req.user.id);
     return res.json({ message: 'Deleted' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -282,7 +223,7 @@ exports.getComments = async (req, res) => {
       .select('id, name, username, avatar_url, is_verified').in('id', userIds);
     const um = {};
     (users || []).forEach(u => { um[u.id] = u; });
-    return res.json(comments.map(c => ({ ...c, users: um[c.user_id] || null })));
+    return res.json(comments.map(c => ({ ...enrichMediaUrl(c), users: enrichUser(um[c.user_id]) || null })));
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -293,8 +234,13 @@ exports.addComment = async (req, res) => {
   const { content, comment_type, parent_id, duration_seconds } = req.body;
   let media_url = null;
   if (req.file) {
-    const folder = req.file.mimetype.startsWith('audio') ? 'voice-comments' : 'video-comments';
-    media_url = '/uploads/' + folder + '/' + req.file.filename;
+    try {
+      const cldType = req.file.mimetype.startsWith('audio') ? 'voice' : 'post_video';
+      const result  = await uploadBuffer(req.file.buffer, req.file.mimetype, cldType);
+      media_url = result.public_id;
+    } catch (e) {
+      console.error('[addComment] Cloudinary upload failed:', e.message);
+    }
   }
   try {
     const { data, error } = await supabase.from('comments')
@@ -319,7 +265,7 @@ exports.addComment = async (req, res) => {
       .then(({ data: p }) => supabase.from('posts').update({ comments_count: (p?.comments_count || 0) + 1 }).eq('id', id))
       .catch(() => {});
 
-    return res.status(201).json({ ...data, users: user });
+    return res.status(201).json({ ...enrichMediaUrl(data), users: enrichUser(user) });
   } catch (err) {
     console.error('addComment error:', err);
     return res.status(500).json({ error: err.message });

@@ -9,22 +9,10 @@ const { supabase } = require('./config/supabase');
 
 const app = express();
 const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } });
 
-// ── CORS — allow any origin (mobile app, localhost, LAN IP, file://) ──
-const corsOptions = {
-  origin: (origin, cb) => cb(null, true),   // allow all origins
-  credentials: true,
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['Content-Range', 'Accept-Ranges'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));         // handle preflight for all routes
-
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET','POST'], credentials: true }
-});
-
+// ── Middleware ──
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -32,11 +20,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api', require('./routes/index'));
 app.get('/api/health', (_, res) => res.json({ status: 'ok', timestamp: new Date() }));
 
-// ── Static files ──
-app.use('/uploads', (req, res, next) => {
-  res.setHeader('Accept-Ranges', 'bytes');
-  next();
-}, express.static(path.join(__dirname, 'uploads'), { acceptRanges: true }));
+// ── Static files — media served from Cloudinary CDN, not local disk ──
+// Only serve the frontend app itself
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ── SPA fallback ──
