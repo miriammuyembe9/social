@@ -92,7 +92,7 @@ exports.getFollowers = async (req, res) => {
     // Check which ones current user follows
     const { data: myFollows } = await supabase.from('follows').select('following_id').eq('follower_id', req.user.id).in('following_id', ids);
     const mySet = new Set((myFollows||[]).map(f => f.following_id));
-    res.json((users||[]).map(u => ({ ...u, is_following: mySet.has(u.id) })));
+    res.json((users||[]).map(u => ({ ...enrichUser(u), is_following: mySet.has(u.id) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -107,7 +107,7 @@ exports.getFollowing = async (req, res) => {
     const { data: users } = await supabase.from('users').select('id,name,username,avatar_url,is_verified,followers_count').in('id', ids);
     const { data: myFollows } = await supabase.from('follows').select('following_id').eq('follower_id', req.user.id).in('following_id', ids);
     const mySet = new Set((myFollows||[]).map(f => f.following_id));
-    res.json((users||[]).map(u => ({ ...u, is_following: mySet.has(u.id) })));
+    res.json((users||[]).map(u => ({ ...enrichUser(u), is_following: mySet.has(u.id) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -166,7 +166,7 @@ exports.getUserVideos = async (req, res) => {
       .select('id, user_id, title, video_url, thumbnail_url, views_count, likes_count, duration_seconds, created_at')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false });
-    res.json((videos||[]).map(v => ({ ...v, users: user })));
+    res.json((videos||[]).map(v => ({ ...enrichMediaUrl({ ...v, thumbnail_url: buildVideoThumb(v.video_url) }), users: enrichUser(user) })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -705,7 +705,7 @@ exports.getUserFriends = async (req, res) => {
       .eq('status', 'accepted');
 
     const friends = (data || []).map(r => {
-      return r.from_id === user.id ? r.users_to : r.users_from;
+      return enrichUser(r.from_id === user.id ? r.users_to : r.users_from);
     }).filter(Boolean);
     res.json(friends);
   } catch (err) { res.status(500).json({ error: err.message }); }

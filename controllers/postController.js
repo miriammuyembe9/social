@@ -284,3 +284,27 @@ exports.deleteComment = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
+
+// ── SEARCH POSTS ─────────────────────────────────────────────────────────────
+exports.searchPosts = async (req, res) => {
+  const { q } = req.query;
+  if (!q || !q.trim()) return res.json([]);
+  try {
+    const { data: posts, error } = await supabase
+      .from('posts')
+      .select('id, user_id, content, media_url, media_type, likes_count, comments_count, created_at')
+      .ilike('content', `%${q.trim()}%`)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (error) throw error;
+    if (!posts || !posts.length) return res.json([]);
+
+    const userIds = [...new Set(posts.map(p => p.user_id))];
+    const { data: users } = await supabase
+      .from('users').select('id, name, username, avatar_url, is_verified').in('id', userIds);
+    const um = {}; (users || []).forEach(u => { um[u.id] = enrichUser(u); });
+    return res.json(posts.map(p => ({ ...enrichMediaUrl(p), users: um[p.user_id] || null })));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};

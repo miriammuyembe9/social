@@ -29,6 +29,7 @@ router.delete('/comments/:commentId',  auth,                          postCtrl.d
 
 // ── USERS — SPECIFIC routes MUST come before /:username ──
 router.get('/users/search',             auth, mainCtrl.searchUsers);
+router.get('/posts/search',             auth, postCtrl.searchPosts);
 router.get('/users/:username/followers',auth, mainCtrl.getFollowers);
 router.get('/users/:username/following',auth, mainCtrl.getFollowing);
 router.get('/users/notifications',       auth, mainCtrl.getNotifications);
