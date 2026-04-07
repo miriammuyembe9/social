@@ -21,16 +21,16 @@ cloudinary.config({
 // ── Folder mapping ────────────────────────────────────────────────────────────
 // Keeps Cloudinary organised and enables folder-level transforms
 const FOLDERS = {
-  avatar:        'vibe/avatars',
-  cover:         'vibe/covers',
-  post_image:    'vibe/posts/images',
-  post_video:    'vibe/posts/videos',
-  story_image:   'vibe/stories/images',
-  story_video:   'vibe/stories/videos',
-  video:         'vibe/videos',         // dedicated videos page
-  message_image: 'vibe/messages/images',
-  voice:         'vibe/voice',
-  audio_temp:    'vibe/audio_temp',
+  avatar:        'meTooHub/avatars',
+  cover:         'meTooHub/covers',
+  post_image:    'meTooHub/posts/images',
+  post_video:    'meTooHub/posts/videos',
+  story_image:   'meTooHub/stories/images',
+  story_video:   'meTooHub/stories/videos',
+  video:         'meTooHub/videos',         // dedicated videos page
+  message_image: 'meTooHub/messages/images',
+  voice:         'meTooHub/voice',
+  audio_temp:    'meTooHub/audio_temp',
 };
 
 // ── Upload transforms applied AT UPLOAD TIME ──────────────────────────────────
@@ -76,7 +76,7 @@ const UPLOAD_TRANSFORMS = {
 // type: one of the keys in FOLDERS
 // Returns { public_id, secure_url, resource_type, duration? }
 const uploadFile = async (localPath, type, options = {}) => {
-  const folder    = FOLDERS[type] || 'vibe/misc';
+  const folder    = FOLDERS[type] || 'meTooHub/misc';
   const transform = UPLOAD_TRANSFORMS[type] || [];
   const isVideo   = type.includes('video') || type === 'voice';
   const isAudio   = type === 'voice';
@@ -224,7 +224,7 @@ module.exports = {
 // ── Upload from memory buffer (multer memoryStorage) ─────────────────────────
 // Used by controllers when multer is configured with memoryStorage.
 const uploadBuffer = (buffer, mimetype, type, options = {}) => new Promise((resolve, reject) => {
-  const folder    = FOLDERS[type] || 'vibe/misc';
+  const folder    = FOLDERS[type] || 'meTooHub/misc';
   const transform = UPLOAD_TRANSFORMS[type] || [];
   const isVideo   = mimetype.startsWith('video/');
   const isAudio   = mimetype.startsWith('audio/');

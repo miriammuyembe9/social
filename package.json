@@ -1,7 +1,7 @@
 {
-  "name": "vibe-social",
+  "name": "meTooHub-social",
   "version": "2.0.0",
-  "description": "Vibe \u2014 Professional full-stack social media with Supabase, real-time chat, voice/video comments",
+  "description": "meTooHub Professional full-stack social media with Supabase, real-time chat, voice/video comments",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

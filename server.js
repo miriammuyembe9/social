@@ -136,7 +136,7 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log('\n✦ Vibe Social running at http://localhost:' + PORT);
+  console.log('meTooHub Social running at http://localhost:' + PORT);
   console.log('   Supabase: ' + (process.env.SUPABASE_URL ? '✅ Connected' : '❌ Not configured'));
   console.log('   Socket.io: ✅ Ready\n');
 });
