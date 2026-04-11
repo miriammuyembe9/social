@@ -389,7 +389,7 @@ exports.uploadVideo = async (req, res) => {
   try {
     const result    = await uploadBuffer(fileObj.buffer, fileObj.mimetype, 'video');
     const video_url = result.public_id;
-    const dur       = result.duration || (duration_seconds ? parseFloat(duration_seconds) : null);
+    const dur       = result.duration ? Math.floor(result.duration) : (duration_seconds ? parseInt(duration_seconds, 10) : null);
     const { data, error } = await supabase
       .from('videos')
       .insert({ user_id: req.user.id, title, description, video_url, duration_seconds: dur })
