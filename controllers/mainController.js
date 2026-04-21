@@ -301,6 +301,21 @@ exports.sendMessage = async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
+// ── DELETE A SINGLE MESSAGE ───────────────────────────────────────────────────
+exports.deleteMessage = async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Only the sender can delete their own message
+    const { data: msg } = await supabase
+      .from('messages').select('id, sender_id').eq('id', id).single();
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+    if (msg.sender_id !== req.user.id)
+      return res.status(403).json({ error: 'You can only delete your own messages' });
+    await supabase.from('messages').delete().eq('id', id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+};
+
 // ===== GROUPS CONTROLLER =====
 exports.getGroups = async (req, res) => {
   try {
@@ -404,6 +419,24 @@ exports.viewVideo = async (req, res) => {
   try { await supabase.rpc('increment_video_views', { video_id: req.params.id }); } catch (_) {}
   res.json({ success: true });
 };
+
+exports.deleteVideo = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data: video } = await supabase
+      .from('videos').select('id, user_id, video_url').eq('id', id).single();
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    if (video.user_id !== req.user.id)
+      return res.status(403).json({ error: 'You can only delete your own videos' });
+    // Delete from Cloudinary (fire-and-forget)
+    if (video.video_url && !video.video_url.startsWith('http')) {
+      deleteFile(video.video_url, 'video');
+    }
+    await supabase.from('videos').delete().eq('id', id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+};
+
 // ===== GROUP EXTENDED CONTROLLERS =====
 
 exports.getGroupMembers = async (req, res) => {
